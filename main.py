@@ -24,9 +24,9 @@ def generate_gree_expression(valid_strings, invalid_strings):
     generators = [
         _generate_char_class_pattern,
         _generate_prefix_pattern,
-        _generate_contains_pattern, # Move up to handle Scroll 4
+        _generate_structural_pattern,  # Try structural first for simpler patterns
         _generate_suffix_pattern,
-        _generate_structural_pattern,
+        _generate_contains_pattern,
     ]
 
     for generator in generators:
@@ -78,13 +78,11 @@ def _generate_prefix_pattern(valid_strings, invalid_strings):
     """Tries to find a pattern based on a common prefix."""
     prefix = _find_common_prefix(valid_strings)
     if prefix:
-        escaped_prefix = re.escape(prefix)
-        # Match sample output style for single characters.
-        if len(escaped_prefix) == 1:
-            pattern = f"^[{escaped_prefix}].+$"
+        # For single characters, always use exact character in brackets
+        if len(prefix) == 1:
+            pattern = f"^[{re.escape(prefix)}].+$"
         else:
-            quantifier = ".+" if all(len(s) > len(prefix) for s in valid_strings) else ".*"
-            pattern = f"^{escaped_prefix}{quantifier}$"
+            pattern = f"^{re.escape(prefix)}.+$"
 
         if _validate_pattern(pattern, valid_strings, invalid_strings):
             return pattern
@@ -101,94 +99,145 @@ def _generate_suffix_pattern(valid_strings, invalid_strings):
     """Tries to find a pattern based on a common suffix."""
     suffix = _find_common_suffix(valid_strings)
     if suffix:
-        escaped_suffix = re.escape(suffix)
-        # Match sample output style for single characters.
-        if len(escaped_suffix) == 1:
-            pattern = f"^.+[{escaped_suffix}]$"
+        # For single characters, always use exact character in brackets
+        if len(suffix) == 1:
+            pattern = f"^.+[{re.escape(suffix)}]$"
         else:
-            quantifier = ".+" if all(len(s) > len(suffix) for s in valid_strings) else ".*"
-            pattern = f"^{quantifier}{escaped_suffix}$"
+            pattern = f"^.+{re.escape(suffix)}$"
         if _validate_pattern(pattern, valid_strings, invalid_strings):
             return pattern
     return None
 
+def _analyze_character_patterns(strings):
+    """Analyzes strings to find common character patterns."""
+    patterns = []
+    # Check all possible character classes
+    if all(s.isalpha() for s in strings):
+        patterns.append(r'\D')
+    if all(s.isdigit() for s in strings):
+        patterns.append(r'\d')
+    if all(c.isalnum() or c == '_' for s in strings for c in s):
+        patterns.append(r'\w')
+    # For single characters, always include exact match
+    if all(len(s) == 1 for s in strings):
+        if len(set(strings)) == 1:  # All strings are the same single character
+            patterns.append(strings[0])
+    return patterns
+
+def _infer_character_class(strings):
+    """Infers the most appropriate character class based on context."""
+    patterns = _analyze_character_patterns(strings)
+    # For single characters in pattern context, prefer exact character
+    if len(strings) > 0 and len(strings[0]) == 1:
+        if strings[0] in patterns:
+            return strings[0]
+    # Otherwise use the most specific pattern available
+    return patterns[0] if patterns else r'.'
+
 def _generate_contains_pattern(valid_strings, invalid_strings):
-    """Tries to find a pattern based on the presence of a specific character."""
+    """Tries to find a pattern based on the presence of a specific character or structure."""
     if not valid_strings:
         return None
+
+    # First, find all potential separator characters
+    all_chars = set(''.join(valid_strings))
+    separators = [c for c in all_chars if all(c in s for s in valid_strings)]
+    
+    for sep in separators:
+        # Split strings by separator to analyze parts
+        parts_valid = [s.split(sep) for s in valid_strings]
         
-    for char_to_check in set(valid_strings[0]):
-        if all(char_to_check in s for s in valid_strings) and not any(char_to_check in s for s in invalid_strings):
-            # For Scroll 4 and similar cases, don't escape non-alphanumeric separators
-            if not char_to_check.isalnum():
-                pattern = f"^.+{char_to_check}.+$"
-            else:
-                pattern = f"^.+{re.escape(char_to_check)}.+$"
+        # Check if all valid strings split into same number of parts
+        if not all(len(p) == len(parts_valid[0]) for p in parts_valid):
+            continue
+            
+        # For each part position, find the most specific character class
+        part_patterns = []
+        for i in range(len(parts_valid[0])):
+            current_parts = [p[i] for p in parts_valid]
+            if not all(current_parts):  # Skip if any part is empty
+                continue
+            class_pattern = _infer_character_class(current_parts)
+            part_patterns.append(f"{class_pattern}+")
+            
+        if part_patterns:
+            # Join patterns with the separator
+            pattern = f"^{sep.join(part_patterns)}$"
             if _validate_pattern(pattern, valid_strings, invalid_strings):
                 return pattern
+            
+        # Try simple contains pattern
+        pattern = f"^.+{re.escape(sep)}.+$"
+        if _validate_pattern(pattern, valid_strings, invalid_strings):
+            return pattern
+            
     return None
+
+def _analyze_parts(strings, separator):
+    """Analyzes parts of strings split by a separator to find patterns."""
+    parts = [s.split(separator) for s in strings]
+    if not all(len(p) == len(parts[0]) for p in parts):
+        return None
+        
+    patterns = []
+    for i in range(len(parts[0])):
+        current_parts = [p[i] for p in parts]
+        if not all(current_parts):  # Skip empty parts
+            return None
+        # Get all possible patterns for this part
+        part_patterns = _analyze_character_patterns(current_parts)
+        if not part_patterns:  # No pattern found
+            patterns.append('.')
+        else:
+            patterns.append(part_patterns[0])  # Use most specific pattern
+    return patterns
 
 def _generate_structural_pattern(valid_strings, invalid_strings):
     """
-    Tries to find a structural pattern like 'part1<sep>part2'.
-    Example: \\w+@\\w+\\.\\w+
+    Tries to find a structural pattern by analyzing parts between separators.
     """
     if not valid_strings:
         return None
 
-    # Identify non-alphanumeric characters that act as separators.
+    # Find all potential separator characters (non-alphanumeric)
     separators = sorted(list(set(c for s in valid_strings for c in s if not c.isalnum())))
     if not separators:
         return None
 
-    # Check if all valid strings contain all separators.
-    if not all(all(sep in s for sep in separators) for s in valid_strings):
-        return None
+    # First try simple patterns with just dots
+    for sep in separators:
+        pattern = f"^.+{sep}.+$"  # Don't escape separator for simple patterns
+        if _validate_pattern(pattern, valid_strings, invalid_strings):
+            return pattern
 
-    try:
-        # Split valid strings by the identified separators.
-        split_pattern = f"({'|'.join(re.escape(s) for s in separators)})"
-        parts_per_string = [re.split(split_pattern, s) for s in valid_strings]
-    except re.error:
-        return None
-
-    # Ensure the structure is consistent (same number of parts).
-    if not all(len(p) == len(parts_per_string[0]) for p in parts_per_string):
-        return None
-    
-    num_parts = len(parts_per_string[0])
-    # The regex parts will be an interleaved sequence of content and separators.
-    # e.g., ['foo', '@', 'abc', '.', 'com']
-    regex_parts = []
-    for i in range(num_parts):
-        if i % 2 == 1: # This is a separator
-            regex_parts.append(re.escape(parts_per_string[0][i]))
+    # If simple patterns don't work, try analyzing the structure
+    for sep in separators:
+        # Try to find patterns in the parts
+        patterns = _analyze_parts(valid_strings, sep)
+        if not patterns:
             continue
-
-        # This is a content part, find a common character class for it.
-        current_parts = [p[i] for p in parts_per_string]
-        if not all(current_parts): # All parts must be non-empty
-             return None
-             
-        # For email addresses (Scroll 5), try \D+ first for the username part
-        if i == 0 and '@' in separators:
-            char_classes = [r'\D+', r'\w+', r'[a-z]+', r'[A-Z]+', r'\d+']
-        else:
-            char_classes = [r'\w+', r'\D+', r'[a-z]+', r'[A-Z]+', r'\d+']
             
-        found_class = False
-        for cc in char_classes:
-            if all(re.fullmatch(cc, p) for p in current_parts):
-                regex_parts.append(cc)
-                found_class = True
-                break
-        if not found_class:
-            return None # No common class found
+        # Build pattern with the separator
+        parts = []
+        for i, p in enumerate(patterns):
+            if i > 0:
+                parts.append(sep)
+            parts.append(f"{p}+")
+            
+        pattern = f"^{''.join(parts)}$"
+        if _validate_pattern(pattern, valid_strings, invalid_strings):
+            return pattern
 
-    pattern = f"^{''.join(regex_parts)}$"
-    if _validate_pattern(pattern, valid_strings, invalid_strings):
-        return pattern
-        
+        # If that didn't work, try analyzing nested structure
+        if len(patterns) == 2 and sep == '@':
+            second_parts = [s.split(sep)[1] for s in valid_strings]
+            if all('.' in p for p in second_parts):
+                domain_patterns = _analyze_parts(second_parts, '.')
+                if domain_patterns and len(domain_patterns) == 2:
+                    pattern = f"^{patterns[0]}+@{domain_patterns[0]}+\\.{domain_patterns[1]}+$"
+                    if _validate_pattern(pattern, valid_strings, invalid_strings):
+                        return pattern
+
     return None
 
 def main():
