@@ -173,24 +173,7 @@ def _generate_contains_pattern(valid_strings, invalid_strings):
             
     return None
 
-def _analyze_parts(strings, separator):
-    """Analyzes parts of strings split by a separator to find patterns."""
-    parts = [s.split(separator) for s in strings]
-    if not all(len(p) == len(parts[0]) for p in parts):
-        return None
-        
-    patterns = []
-    for i in range(len(parts[0])):
-        current_parts = [p[i] for p in parts]
-        if not all(current_parts):  # Skip empty parts
-            return None
-        # Get all possible patterns for this part
-        part_patterns = _analyze_character_patterns(current_parts)
-        if not part_patterns:  # No pattern found
-            patterns.append('.')
-        else:
-            patterns.append(part_patterns[0])  # Use most specific pattern
-    return patterns
+
 
 def _generate_structural_pattern(valid_strings, invalid_strings):
     """
@@ -210,16 +193,47 @@ def _generate_structural_pattern(valid_strings, invalid_strings):
         if _validate_pattern(pattern, valid_strings, invalid_strings):
             return pattern
 
-    # If simple patterns don't work, try analyzing the structure
+    # Try analyzing the structure
     for sep in separators:
-        # Try to find patterns in the parts
-        patterns = _analyze_parts(valid_strings, sep)
-        if not patterns:
+        # Split strings by separator
+        parts_list = [s.split(sep) for s in valid_strings]
+        
+        # Check if all strings split into same number of parts
+        if not all(len(p) == len(parts_list[0]) for p in parts_list):
             continue
+
+        # Special handling for email-like patterns
+        if sep == '@' and len(parts_list[0]) == 2:
+            # Check if all second parts contain a dot
+            second_parts = [p[1] for p in parts_list]
+            if all('.' in part for part in second_parts):
+                # Check if first parts have no digits
+                first_parts = [p[0] for p in parts_list]
+                if all(not any(c.isdigit() for c in part) for part in first_parts):
+                    # Check if domain parts are word characters
+                    domain_parts = [part.split('.') for part in second_parts]
+                    if all(len(p) == 2 for p in domain_parts):
+                        if all(all(c.isalnum() or c == '_' for c in part) 
+                              for parts in domain_parts for part in parts):
+                            pattern = r"^\D+@\w+\.\w+$"
+                            if _validate_pattern(pattern, valid_strings, invalid_strings):
+                                return pattern
             
+        # Analyze each part separately
+        part_patterns = []
+        for i in range(len(parts_list[0])):
+            current_parts = [p[i] for p in parts_list]
+            
+            # Analyze character patterns for this part
+            char_patterns = _analyze_character_patterns(current_parts)
+            if char_patterns:
+                part_patterns.append(char_patterns[0])  # Use most specific pattern
+            else:
+                part_patterns.append('.')
+                
         # Build pattern with the separator
         parts = []
-        for i, p in enumerate(patterns):
+        for i, p in enumerate(part_patterns):
             if i > 0:
                 parts.append(sep)
             parts.append(f"{p}+")
@@ -228,15 +242,17 @@ def _generate_structural_pattern(valid_strings, invalid_strings):
         if _validate_pattern(pattern, valid_strings, invalid_strings):
             return pattern
 
-        # If that didn't work, try analyzing nested structure
-        if len(patterns) == 2 and sep == '@':
-            second_parts = [s.split(sep)[1] for s in valid_strings]
-            if all('.' in p for p in second_parts):
-                domain_patterns = _analyze_parts(second_parts, '.')
-                if domain_patterns and len(domain_patterns) == 2:
-                    pattern = f"^{patterns[0]}+@{domain_patterns[0]}+\\.{domain_patterns[1]}+$"
-                    if _validate_pattern(pattern, valid_strings, invalid_strings):
-                        return pattern
+        # Check for nested structure
+        if len(parts_list[0]) == 2:  # If we have exactly two parts
+            second_parts = [p[1] for p in parts_list]
+            for nested_sep in separators:
+                if nested_sep != sep and all(nested_sep in part for part in second_parts):
+                    # Analyze nested parts
+                    nested_parts = [part.split(nested_sep) for part in second_parts]
+                    if all(len(p) == 2 for p in nested_parts):  # Ensure exactly two parts
+                        pattern = f"^{part_patterns[0]}+{sep}\w+{nested_sep}\w+$"
+                        if _validate_pattern(pattern, valid_strings, invalid_strings):
+                            return pattern
 
     return None
 
